@@ -8,15 +8,31 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/gorilla/mux"
 )
 
 type UploadResponse struct {
 	Sha string `json:"sha"`
 	Url string `json:"access_url"`
+}
+
+type Metadata struct {
+	Sha       string    `json:"sha"`
+	MachineId string    `json:"machine_id"`
+	Time      time.Time `json:"created_at"`
+}
+
+type Directory struct {
+	Files []string
 }
 
 type FailureResponse struct {
@@ -30,14 +46,6 @@ func StreamToByte(stream io.Reader) []byte {
 }
 
 func upload(w http.ResponseWriter, r *http.Request) {
-	// method check
-	if r.Method != "POST" {
-		res, _ := json.Marshal(&FailureResponse{
-			Error: "Method Not Allowed (use POST)",
-		})
-		http.Error(w, string(res), 405)
-		return
-	}
 	r.ParseMultipartForm(32 << 20)
 	file, _, err := r.FormFile("targz")
 
@@ -53,6 +61,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// TODO don't zipbomb
 	// verify file is a gzip file
 	gzf, err := gzip.NewReader(file)
 	if err != nil {
@@ -86,17 +95,54 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	})
 
 	fmt.Fprintf(w, string(res))
+	// TODO only return the above if file successfully saves
 	f, err := os.OpenFile("./test/"+sha+".tar.gz", os.O_WRONLY|os.O_CREATE, 0666)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	defer f.Close()
+
+	metadata, _ := json.Marshal(&Metadata{
+		Sha:       sha,
+		MachineId: r.FormValue("machine_id"),
+		Time:      time.Now(),
+	})
+
+	ioutil.WriteFile("./test/"+sha+".json", metadata, 0666)
 	io.Copy(f, file)
 }
 
+func dump(w http.ResponseWriter, r *http.Request) {
+	params := mux.Vars(r)
+	dat, _ := ioutil.ReadFile("./test/" + params["name"] + ".json")
+	log.Print(dat)
+	fmt.Fprintf(w, string(dat))
+}
+
+func listing(w http.ResponseWriter, r *http.Request) {
+	dir, _ := ioutil.ReadDir("./test")
+	var names []string
+	for _, v := range dir {
+		if strings.HasSuffix(v.Name(), ".json") {
+			names = append(names, strings.TrimSuffix(v.Name(), ".json"))
+		}
+	}
+
+	t, _ := template.ParseFiles("index.gtpl")
+	log.Print(names)
+	t.Execute(w, names)
+}
+
 func main() {
-	http.HandleFunc("/upload", upload)
+	r := mux.NewRouter()
+	r.HandleFunc("/upload", upload).Methods("POST")
+	r.HandleFunc("/", listing).Methods("GET")
+	r.HandleFunc("/dump/{name:[a-z0-9]{40}}", dump).Methods("GET")
+
+	http.Handle("/", r)
+	http.Handle("/raw/", http.StripPrefix("/raw/", http.FileServer(http.Dir("/home/tschuy/projects/beltane/test"))))
+
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
 		panic(err)
