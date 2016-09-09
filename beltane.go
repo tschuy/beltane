@@ -10,15 +10,21 @@ import (
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/minio-go"
 )
+
+const (
+	s3host     = "http://127.0.0.1:9000"
+	bucketName = "beltane"
+)
+
+var minioClient *minio.Client
 
 type UploadResponse struct {
 	Sha string `json:"sha"`
@@ -31,8 +37,11 @@ type Metadata struct {
 	Time      time.Time `json:"created_at"`
 }
 
-type Directory struct {
-	Files []string
+type OutputMetadata struct {
+	Sha       string    `json:"sha"`
+	MachineId string    `json:"machine_id"`
+	Time      time.Time `json:"created_at"`
+	Url       string    `json:"download_url"`
 }
 
 type FailureResponse struct {
@@ -45,6 +54,14 @@ func StreamToByte(stream io.Reader) []byte {
 	return buf.Bytes()
 }
 
+func httperror(w http.ResponseWriter, errstr string, errcode int) {
+	res, _ := json.Marshal(&FailureResponse{
+		Error: errstr,
+	})
+	http.Error(w, string(res), errcode)
+	return
+}
+
 func upload(w http.ResponseWriter, r *http.Request) {
 	r.ParseMultipartForm(32 << 20)
 	file, _, err := r.FormFile("targz")
@@ -52,11 +69,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	// verify file was passed in
 	if err != nil {
 		fmt.Println(err)
-
-		res, _ := json.Marshal(&FailureResponse{
-			Error: "missing required targz field",
-		})
-		http.Error(w, string(res), 422)
+		httperror(w, "missing required targz field", 422)
 		return
 	}
 	defer file.Close()
@@ -65,10 +78,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	// verify file is a gzip file
 	gzf, err := gzip.NewReader(file)
 	if err != nil {
-		res, _ := json.Marshal(&FailureResponse{
-			Error: "invalid gz file",
-		})
-		http.Error(w, string(res), 400)
+		httperror(w, "invalid gz file", 400)
 		return
 	}
 
@@ -76,74 +86,143 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	tarReader := tar.NewReader(gzf)
 	_, err = tarReader.Next()
 	if err != nil {
-		res, _ := json.Marshal(&FailureResponse{
-			Error: "invalid tar file",
-		})
-		http.Error(w, string(res), 400)
+		httperror(w, "invalid tar file", 400)
 		return
 	}
 
 	// save and return
 	h := sha1.New()
-	io.Copy(h, file)
+	file.Seek(0, 0)
+	_, _ = io.Copy(h, file)
 	sha := hex.EncodeToString(h.Sum(nil))
-	log.Printf("%s", sha)
+	log.Printf("uploaded: %s", sha)
 
 	res, err := json.Marshal(&UploadResponse{
 		Sha: sha,
-		Url: "http://localhost:8080/dump/" + sha,
+		Url: "http://localhost:8080/?token=" + sha,
 	})
 
 	fmt.Fprintf(w, string(res))
-	// TODO only return the above if file successfully saves
-	f, err := os.OpenFile("./test/"+sha+".tar.gz", os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		fmt.Println(err)
-		return
+	n := time.Now()
+
+	//  => YYYY/MM/YYYYMMDDHHminmil
+	prefix := n.Format("2006") + "/" + n.Format("01") + "/" + n.Format("02") + "/" + n.Format("20060102150405")
+	machine_id := r.FormValue("machine_id")
+	if machine_id == "" {
+		machine_id = "none"
 	}
-	defer f.Close()
+	machine_id = strings.TrimSpace(machine_id)
 
-	metadata, _ := json.Marshal(&Metadata{
-		Sha:       sha,
-		MachineId: r.FormValue("machine_id"),
-		Time:      time.Now(),
-	})
+	file.Seek(0, 0)
+	// upload to s3
 
-	ioutil.WriteFile("./test/"+sha+".json", metadata, 0666)
-	io.Copy(f, file)
+	name := prefix + "-" + machine_id + "-" + sha + ".tar.gz"
+	ln, _ := minioClient.PutObject(bucketName, name, file, "application/gzip")
+	log.Printf("Wrote %s to %s (%d bytes)", name, bucketName, ln)
 }
 
-func dump(w http.ResponseWriter, r *http.Request) {
-	params := mux.Vars(r)
-	dat, _ := ioutil.ReadFile("./test/" + params["name"] + ".json")
-	log.Print(dat)
-	fmt.Fprintf(w, string(dat))
+func index(w http.ResponseWriter, r *http.Request) {
+	t, _ := template.ParseFiles("index.gtpl")
+	t.Execute(w, nil)
 }
 
-func listing(w http.ResponseWriter, r *http.Request) {
-	dir, _ := ioutil.ReadDir("./test")
-	var names []string
-	for _, v := range dir {
-		if strings.HasSuffix(v.Name(), ".json") {
-			names = append(names, strings.TrimSuffix(v.Name(), ".json"))
+func dumps(w http.ResponseWriter, r *http.Request) {
+	params := r.URL.Query()
+	var err error
+
+	n := time.Now()
+
+	if len(params["date"]) != 0 {
+		n, err = time.Parse("2006/01/02", params["date"][0])
+		if err != nil {
+			httperror(w, "could not parse time parameter", 400)
+			return
 		}
 	}
 
-	t, _ := template.ParseFiles("index.gtpl")
-	log.Print(names)
-	t.Execute(w, names)
+	log.Print(n)
+
+	objects := getByDate(n)
+
+	var output []OutputMetadata
+
+	for _, obj := range objects {
+		key := obj.Key
+		// [2016/09/08/20160908132709 2cf61eb789e243b59adf1a850fc51a44 5dfca0aa0cd01bcdfca1a8cf7e6f955aaf23af9c.tar.gz]
+		parts := strings.Split(key, "-")
+
+		duration := time.Duration(1) * time.Hour
+		getUrl, _ := minioClient.PresignedGetObject(bucketName, obj.Key, duration, nil)
+		t, _ := time.Parse("20060102150405", parts[0][11:])
+		m := OutputMetadata{
+			Time:      t,
+			MachineId: parts[1],
+			Sha:       parts[2],
+			Url:       getUrl.String(),
+		}
+
+		output = append([]OutputMetadata{m}, output...)
+	}
+	j, _ := json.Marshal(output)
+	fmt.Fprintf(w, string(j))
+}
+
+func chanToSlice(channel <-chan minio.ObjectInfo) []minio.ObjectInfo {
+	var slice []minio.ObjectInfo
+	for element := range channel {
+		slice = append(slice, element)
+	}
+	return slice
+}
+
+func prefix(year string, month string, day string) string {
+	return year + "/" + month + "/" + day + "/"
+}
+
+func pop(p string) string {
+	sl := strings.SplitAfter(p, "/")
+	sl = sl[:len(sl)-2]
+	return strings.Join(sl, "")
+}
+
+func getByDate(n time.Time) []minio.ObjectInfo {
+	p := prefix(n.Format("2006"), n.Format("01"), n.Format("02"))
+	objects := chanToSlice(minioClient.ListObjectsV2(bucketName, p, false, nil))
+	if len(objects) > 0 {
+		return objects
+	}
+
+	// TODO recursive popping -- be able to go from 2016/01/01 to 2015/11/30
+	p = pop(p)
+	objects = chanToSlice(minioClient.ListObjectsV2(bucketName, p, false, nil))
+	log.Print(len(objects))
+	log.Print(objects[len(objects)-1].Key)
+	objects = chanToSlice(minioClient.ListObjectsV2(bucketName, objects[len(objects)-1].Key, false, nil))
+	return objects
 }
 
 func main() {
+	endpoint := "127.0.0.1:9000"
+	accessKeyID := "CXULQKAQHP7IV3U9UXAC"
+	secretAccessKey := "w6UB2TZSvDqNLC/mzazp8X5AnWD8BTw3f8JFoxXk"
+	useSSL := false
+
+	var err error
+
+	// Initialize minio client object.
+	minioClient, err = minio.New(endpoint, accessKeyID, secretAccessKey, useSSL)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	r := mux.NewRouter()
 	r.HandleFunc("/upload", upload).Methods("POST")
-	r.HandleFunc("/", listing).Methods("GET")
-	r.HandleFunc("/dump/{name:[a-z0-9]{40}}", dump).Methods("GET")
+	r.HandleFunc("/", index).Methods("GET")
+	r.HandleFunc("/dumps", dumps).Methods("GET")
 
 	http.Handle("/", r)
-	http.Handle("/raw/", http.StripPrefix("/raw/", http.FileServer(http.Dir("/home/tschuy/projects/beltane/test"))))
 
-	err := http.ListenAndServe(":8080", nil)
+	err = http.ListenAndServe(":8080", nil)
 	if err != nil {
 		panic(err)
 	}

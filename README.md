@@ -1,6 +1,8 @@
 # Beltane
 
-The [mayday](https://github.com/coreos/mayday) ingestion service.
+A [mayday](https://github.com/coreos/mayday) celebration.
+
+Beltane is the ingestion service behind `mayday --upload`.
 
 ```
 $ go build
