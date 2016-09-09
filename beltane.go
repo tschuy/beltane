@@ -63,6 +63,7 @@ func httperror(w http.ResponseWriter, errstr string, errcode int) {
 }
 
 func upload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	r.ParseMultipartForm(32 << 20)
 	file, _, err := r.FormFile("targz")
 
@@ -127,6 +128,8 @@ func index(w http.ResponseWriter, r *http.Request) {
 }
 
 func dumps(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
 	params := r.URL.Query()
 	var err error
 
@@ -157,7 +160,7 @@ func dumps(w http.ResponseWriter, r *http.Request) {
 		m := OutputMetadata{
 			Time:      t,
 			MachineId: parts[1],
-			Sha:       parts[2],
+			Sha:       strings.Split(parts[2], ".")[0],
 			Url:       getUrl.String(),
 		}
 
@@ -216,9 +219,11 @@ func main() {
 	}
 
 	r := mux.NewRouter()
-	r.HandleFunc("/upload", upload).Methods("POST")
-	r.HandleFunc("/", index).Methods("GET")
-	r.HandleFunc("/dumps", dumps).Methods("GET")
+	r.HandleFunc("/v1/upload", upload).Methods("POST")
+	r.HandleFunc("/v1/", index).Methods("GET")
+	r.HandleFunc("/v1/dumps", dumps).Methods("GET")
+
+	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./static/")))
 
 	http.Handle("/", r)
 

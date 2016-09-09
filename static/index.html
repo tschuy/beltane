@@ -1,0 +1,33 @@
+<html>
+<head>
+  <title>Beltane</title>
+  <link rel="stylesheet" href="/style.css">
+  <script async src="/script.js"></script>
+</head>
+<body>
+	<div id="outer_wrapper">
+		<div id="inner_wrapper">
+			<div id="header">
+				<h1 id="header_text">Recent Mayday Dumps</h1>
+			</div>
+			<div id="table_wrapper">
+				<table id="table">
+					<thead id="table_header">
+						<tr class="header_row">
+							<th class="th_element">Date</th>
+							<th class="th_element">Machine Id</th>
+							<th class="th_element">Hash</th>
+							<th class="th_element">Download</th>
+						</tr>
+					</thead>
+					<tbody id="dump_list" class="tbody"></tbody>
+				</table>
+  		</div>
+      <form id="selector" onsubmit="changeDate(); return false;">
+        View by date:
+        <input type="date" name="date_box"> <button name="date_selector">Go</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
