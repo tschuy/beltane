@@ -8,7 +8,7 @@
 	<div id="outer_wrapper">
 		<div id="inner_wrapper">
 			<div id="header">
-				<h1 id="header_text">Recent Mayday Dumps</h1>
+				<h1 id="header_text">Mayday Dumps</h1>
 			</div>
 			<div id="table_wrapper">
 				<table id="table">
@@ -25,7 +25,14 @@
   		</div>
       <form id="selector" onsubmit="changeDate(); return false;">
         View by date:
-        <input type="date" name="date_box"> <button name="date_selector">Go</button>
+        <input type="date" name="date_box">
+        <select id="num" name="num">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <button name="date_selector">Go</button>
       </form>
     </div>
   </div>

@@ -6,6 +6,16 @@
     font: normal normal normal normal 12.8px / 18.2857px "Source Sans Pro", Helvetica, sans-serif;
 }
 
+.highlight {
+    background-color: #ffffbb;
+}
+
+.centered {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
 #outer_wrapper {
     bottom: 0px;
     box-sizing: border-box;
