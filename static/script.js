@@ -1,4 +1,4 @@
-var getDumpsByDay = function(date, num) {
+var getDumps = function(date, num, token) {
   // date of request (Date object)
   // number of days to display starting from that date
   var httpRequest;
@@ -33,6 +33,13 @@ var getDumpsByDay = function(date, num) {
       }
     }
   }
+
+  // this probably should be its own function
+  if (token !== undefined) {
+    makeRequest('/v1/dumps?token=${token}');
+    return;
+  }
+
   if (num === undefined) {
     num = 20;
   }
@@ -66,7 +73,7 @@ var changeDate = function() {
   var count = document.getElementsByName("num")[0].value;
   var temp_time = new Date(selected_date + " GMT");
   var local_time = new Date(temp_time.getTime() + temp_time.getTimezoneOffset()*60000);
-  return getDumpsByDay(local_time, count);
+  return getDumps(local_time, count);
 }
 
 var padZero = function(month) {
@@ -100,8 +107,12 @@ var appendElement = function(dump) {
 }
 
 window.onload = function() {
-  // get date specified by url parameter, if specified
-  var date = getParam('date');
-  date = date ? new Date(date) : new Date();
-  getDumpsByDay(date, 20);
+  var token = getParam('token');
+  if (token) {
+    getDumps(null, null, token);
+  } else {
+    var date = getParam('date');
+    date = date ? new Date(date) : new Date();
+    getDumps(date, 20);
+  }
 }

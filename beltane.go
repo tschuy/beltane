@@ -33,8 +33,8 @@ var bucketName = "beltane"
 var s3Client *s3.S3
 
 type UploadResponse struct {
-	Sha string `json:"sha"`
-	Url string `json:"access_url"`
+	Sha    string `json:"sha"`
+	Access string `json:"access_key"`
 }
 
 type Metadata struct {
@@ -89,14 +89,7 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	log.Printf("uploaded: %s", sha)
 
 	timestamp := math.MaxInt64 - time.Now().Unix()
-
-	res, err := json.Marshal(&UploadResponse{
-		Sha: sha,
-		// TODO just return timestamp, machineid, and sha as access "token"
-		Url: "http://localhost:8080/?sha=" + sha,
-	})
-
-	fmt.Fprintf(w, string(res))
+	timestr := strconv.FormatInt(timestamp, 16)
 
 	machine_id := r.FormValue("machine_id")
 	if machine_id == "" {
@@ -104,10 +97,17 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	}
 	machine_id = strings.TrimSpace(machine_id)
 
+	res, err := json.Marshal(&UploadResponse{
+		Sha:    sha,
+		Access: timestr + "-" + machine_id + sha,
+	})
+
+	fmt.Fprintf(w, string(res))
+
 	file.Seek(0, 0)
 	// upload to s3
 
-	name := strconv.FormatInt(timestamp, 16) + "-" + machine_id + "-" + sha + ".tar.gz"
+	name := timestr + "-" + machine_id + "-" + sha + ".tar.gz"
 	_, err = s3Client.PutObject(&s3.PutObjectInput{
 		Body:   file,
 		Bucket: &bucketName,
@@ -122,7 +122,6 @@ func upload(w http.ResponseWriter, r *http.Request) {
 }
 
 func getDumpsByDate(n time.Time, maxKeys int) ([]OutputMetadata, error) {
-	var output []OutputMetadata
 
 	n = n.AddDate(0, 0, 1) // add one day to get all things made *on* that day, not before
 	marker := strconv.FormatInt(math.MaxInt64-n.Unix(), 16)
@@ -138,8 +137,30 @@ func getDumpsByDate(n time.Time, maxKeys int) ([]OutputMetadata, error) {
 	})
 
 	if err != nil {
-		return output, err
+		return []OutputMetadata{}, err
 	}
+
+	return processObjects(objects)
+}
+
+func getDumpsByToken(token string) ([]OutputMetadata, error) {
+	var maxKeys = int64(1)
+
+	objects, err := s3Client.ListObjects(&s3.ListObjectsInput{
+		Bucket:  &bucketName,
+		MaxKeys: &maxKeys,
+		Marker:  &token,
+	})
+
+	if err != nil {
+		return []OutputMetadata{}, err
+	}
+
+	return processObjects(objects)
+}
+
+func processObjects(objects *s3.ListObjectsOutput) ([]OutputMetadata, error) {
+	var output []OutputMetadata
 
 	for _, obj := range objects.Contents {
 		key := obj.Key
@@ -154,7 +175,8 @@ func getDumpsByDate(n time.Time, maxKeys int) ([]OutputMetadata, error) {
 			Time:      t,
 			MachineId: parts[1],
 			Sha:       strings.Split(parts[2], ".")[0],
-			Url:       getUrl,
+			// TODO downloading
+			Url: getUrl,
 		}
 
 		output = append(output, m)
@@ -168,29 +190,34 @@ func dumps(w http.ResponseWriter, r *http.Request) {
 
 	params := r.URL.Query()
 	var err error
+	var output []OutputMetadata
 
 	n := time.Now() // default time to show before
 	num := 20       // default number of items to show
 
-	if len(params["date"]) != 0 {
-		n, err = time.Parse("2006/01/02", params["date"][0])
-		if err != nil {
-			log.Print(err)
-			httperror(w, "could not parse time parameter", 400)
-			return
+	if len(params["token"]) != 0 {
+		output, err = getDumpsByToken(params["token"][0])
+	} else {
+		if len(params["date"]) != 0 {
+			n, err = time.Parse("2006/01/02", params["date"][0])
+			if err != nil {
+				log.Print(err)
+				httperror(w, "could not parse time parameter", 400)
+				return
+			}
 		}
+
+		if len(params["num"]) != 0 {
+			num, err = strconv.Atoi(params["num"][0])
+			if err != nil {
+				log.Print(err)
+				httperror(w, "could not parse num parameter", 400)
+				return
+			}
+		}
+		output, err = getDumpsByDate(n, num)
 	}
 
-	if len(params["num"]) != 0 {
-		num, err = strconv.Atoi(params["num"][0])
-		if err != nil {
-			log.Print(err)
-			httperror(w, "could not parse num parameter", 400)
-			return
-		}
-	}
-
-	output, err := getDumpsByDate(n, num)
 	if err != nil {
 		log.Print(err)
 		httperror(w, "error processing request", 500)
